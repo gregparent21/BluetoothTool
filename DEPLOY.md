@@ -97,7 +97,22 @@ Either format works — the page passes its key to `supabase-js`, and the Mac
 sends its key as the `apikey` and `Authorization` headers to PostgREST. Both
 accept old and new styles.
 
-Also copy the **Project URL** (`https://xxxxxxxxxxxx.supabase.co`).
+### The Project URL
+
+It always has the form `https://<project-ref>.supabase.co`, and there are three
+places to get it:
+
+- **The `Connect` button** at the top of the dashboard — shows the URL and the
+  keys together, already formatted for `supabase-js`. Easiest.
+- **Project Settings → Data API → Project URL.** The keys moved to their own
+  **API Keys** page, so the URL is no longer beside them.
+- **Your browser's address bar.** While the project is open you are at
+  `supabase.com/dashboard/project/<project-ref>` — that middle segment *is* the
+  ref, so the URL is `https://<that>.supabase.co`. Works regardless of how the
+  dashboard is laid out this month.
+
+The ref is roughly twenty lowercase letters. It is not a secret; it appears in
+every request the browser makes.
 
 > The secret key bypasses RLS entirely. It belongs in
 > `~/.config/multi-speaker/remote.json` and nowhere else — never in Vercel,

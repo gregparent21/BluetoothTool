@@ -34,6 +34,16 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSUIElement</key>                   <true/>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>BluetoothTool connects your paired speakers and headphones so it can play to all of them at once.</string>
+    <!-- Reading now-playing and driving transport controls in Spotify. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Multi-Speaker shows what Spotify is playing and lets you skip or pause it from the menu bar and the remote page.</string>
+    <!-- Permits plain HTTP to loopback and .local only, so `supabase start`
+         works for local testing. Real Supabase projects are HTTPS and are
+         still held to full ATS. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>          <true/>
+    </dict>
 </dict>
 </plist>
 PLIST

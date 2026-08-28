@@ -2,6 +2,18 @@ import CoreAudio
 import Foundation
 import os
 
+/// One speaker in the stack, plus how far to hold its audio back.
+///
+/// Speakers in the same room rarely start a sample at the same instant — a
+/// portable speaker can trail earbuds by tens of milliseconds — and a stacked
+/// device does no alignment of its own. Delaying the *early* speakers until
+/// they match the latest one is what removes the echo.
+struct AggregateMember: Equatable {
+    let uid: String
+    /// Extra output delay in milliseconds. 0 plays as early as the hardware allows.
+    var delayMilliseconds: Int
+}
+
 /// Owns the "stacked" aggregate device — what Audio MIDI Setup calls a
 /// *Multi-Output Device*. macOS fans a single stream out to every sub-device
 /// and drift-corrects the ones that aren't the clock source.
@@ -16,8 +28,8 @@ final class MultiOutputDevice {
     nonisolated static let name = "Multi-Speaker"
 
     private(set) var deviceID: AudioDeviceID?
-    /// Sub-device UIDs currently baked into the aggregate, in order.
-    private(set) var memberUIDs: [String] = []
+    /// Members currently baked into the aggregate, in order.
+    private(set) var members: [AggregateMember] = []
 
     private let log = Logger(subsystem: "com.bluetoothtool", category: "MultiOutput")
 
@@ -25,23 +37,25 @@ final class MultiOutputDevice {
 
     // MARK: - Lifecycle
 
-    /// Make the aggregate contain exactly `uids`, recreating it if membership changed.
+    /// Make the aggregate contain exactly `wanted`, recreating it if membership
+    /// or any member's delay changed.
     ///
     /// Returns the aggregate's device ID, or nil if there is nothing to play to.
     @discardableResult
-    func synchronize(memberUIDs uids: [String]) async -> AudioDeviceID? {
-        guard !uids.isEmpty else {
+    func synchronize(members wanted: [AggregateMember]) async -> AudioDeviceID? {
+        guard !wanted.isEmpty else {
             destroy()
             return nil
         }
-        if let existing = deviceID, uids == memberUIDs {
+        if let existing = deviceID, wanted == members {
             return existing
         }
 
-        // The HAL has no supported way to re-stack a live aggregate, so
-        // membership changes mean tear down and rebuild. Remember whether we
-        // were the default output so the switch is invisible to whatever is
-        // already playing.
+        // The HAL has no supported way to re-stack a live aggregate, and
+        // `latency-out` is only read when the device is built, so both a
+        // membership change and a delay change mean tear down and rebuild.
+        // Remember whether we were the default output so the switch is
+        // invisible to whatever is already playing.
         let wasDefault = deviceID != nil && AudioSystem.defaultOutputDeviceID == deviceID
         destroy()
 
@@ -49,9 +63,9 @@ final class MultiOutputDevice {
         // same UID before it lands fails or hands back the dying device.
         await waitForRemoval()
 
-        guard let created = create(memberUIDs: uids) else { return nil }
+        guard let created = create(members: wanted) else { return nil }
         deviceID = created
-        memberUIDs = uids
+        members = wanted
         if wasDefault {
             await AudioSystem.setDefaultOutputVerified(created)
         }
@@ -74,23 +88,27 @@ final class MultiOutputDevice {
             log.error("Failed to destroy aggregate device: \(status)")
         }
         deviceID = nil
-        memberUIDs = []
+        members = []
     }
 
     // MARK: - Creation
 
-    private func create(memberUIDs uids: [String]) -> AudioDeviceID? {
+    private func create(members wanted: [AggregateMember]) -> AudioDeviceID? {
         // The clock source. Every other member gets drift-corrected onto it, so
         // prefer a wired/built-in device when one is present: its clock is far
         // more stable than a Bluetooth link's.
-        let main = clockSource(among: uids)
+        let main = clockSource(among: wanted.map(\.uid))
 
-        let subDevices: [[String: Any]] = uids.map { uid in
-            [
-                kAudioSubDeviceUIDKey: uid,
-                kAudioSubDeviceDriftCompensationKey: uid == main ? 0 : 1,
+        let subDevices: [[String: Any]] = wanted.map { member in
+            var entry: [String: Any] = [
+                kAudioSubDeviceUIDKey: member.uid,
+                kAudioSubDeviceDriftCompensationKey: member.uid == main ? 0 : 1,
                 kAudioSubDeviceDriftCompensationQualityKey: kAudioSubDeviceDriftCompensationHighQuality,
             ]
+            if member.delayMilliseconds > 0 {
+                entry[kAudioSubDeviceExtraOutputLatencyKey] = delayFrames(member)
+            }
+            return entry
         }
 
         let description: [String: Any] = [
@@ -112,6 +130,36 @@ final class MultiOutputDevice {
             return nil
         }
         return created
+    }
+
+    /// The delay the HAL actually stored for each member, in sample frames.
+    ///
+    /// Reads the aggregate's composition back rather than trusting what was
+    /// asked for — `latency-out` is accepted silently, so this is the only way
+    /// to confirm a delay really landed.
+    nonisolated static func appliedOutputDelays(of aggregate: AudioDeviceID) -> [String: Int] {
+        var address = CA.address(kAudioAggregateDevicePropertyComposition)
+        var composition: CFDictionary? = nil
+        var size = UInt32(MemoryLayout<CFDictionary?>.size)
+        let status = withUnsafeMutablePointer(to: &composition) {
+            AudioObjectGetPropertyData(aggregate, &address, 0, nil, &size, $0)
+        }
+        guard status == noErr,
+              let dictionary = composition as? [String: Any],
+              let subDevices = dictionary[kAudioAggregateDeviceSubDeviceListKey] as? [[String: Any]]
+        else { return [:] }
+
+        return subDevices.reduce(into: [:]) { result, sub in
+            guard let uid = sub[kAudioSubDeviceUIDKey] as? String else { return }
+            result[uid] = sub[kAudioSubDeviceExtraOutputLatencyKey] as? Int ?? 0
+        }
+    }
+
+    /// `latency-out` counts sample frames, so the conversion needs the rate of
+    /// the device being delayed rather than a fixed 44.1k assumption.
+    private func delayFrames(_ member: AggregateMember) -> Int {
+        let rate = AudioSystem.device(withUID: member.uid).map { AudioSystem.sampleRate(of: $0.id) } ?? 44_100
+        return Int((Double(member.delayMilliseconds) / 1000.0 * rate).rounded())
     }
 
     /// Wired devices make better clock sources than Bluetooth ones.

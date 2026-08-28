@@ -87,12 +87,33 @@ struct SelfTest {
         multiOutput.adoptOrphanedDevice()
         multiOutput.destroy()
 
-        let uids = live.map(\.1.uid)
-        guard let aggregateID = await multiOutput.synchronize(memberUIDs: uids),
+        // Delay the second speaker so the composition read-back below has
+        // something non-zero to prove.
+        let members = live.enumerated().map { index, entry in
+            AggregateMember(uid: entry.1.uid, delayMilliseconds: index == 1 ? 50 : 0)
+        }
+        guard let aggregateID = await multiOutput.synchronize(members: members),
               let aggregate = AudioSystem.device(for: aggregateID) else {
             return fail("Could not create the aggregate device.")
         }
         pass("created '\(aggregate.name)' with \(aggregate.outputChannels) output channels")
+
+        section("Per-speaker delay")
+        let applied = MultiOutputDevice.appliedOutputDelays(of: aggregateID)
+        for member in members {
+            let expected = member.delayMilliseconds
+            guard let frames = applied[member.uid] else {
+                fail("\(member.uid): no latency-out reported back")
+                continue
+            }
+            let rate = AudioSystem.device(withUID: member.uid).map { AudioSystem.sampleRate(of: $0.id) } ?? 44_100
+            let ms = Int((Double(frames) / rate * 1000).rounded())
+            if ms == expected {
+                pass("\(member.uid): \(expected) ms → \(frames) frames")
+            } else {
+                fail("\(member.uid): asked for \(expected) ms, HAL reports \(ms) ms")
+            }
+        }
 
         if AudioSystem.outputDevices().contains(where: { $0.id == aggregateID }) {
             pass("visible system-wide — other apps can select it")

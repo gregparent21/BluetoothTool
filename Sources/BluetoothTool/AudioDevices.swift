@@ -70,6 +70,15 @@ enum AudioSystem {
         outputDevices().first { $0.uid == uid }
     }
 
+    /// The device's current sample rate. Delay is configured in sample frames,
+    /// so converting a millisecond figure needs the rate of the specific device
+    /// being delayed — Bluetooth speakers commonly run at 44.1k, but not always.
+    static func sampleRate(of id: AudioDeviceID) -> Double {
+        guard let rate = CA.get(id, CA.address(kAudioDevicePropertyNominalSampleRate), initial: Float64(0)),
+              rate > 0 else { return 44_100 }
+        return Double(rate)
+    }
+
     // MARK: - Default output
 
     static var defaultOutputDeviceID: AudioDeviceID? {

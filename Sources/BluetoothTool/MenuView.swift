@@ -1,7 +1,25 @@
 import SwiftUI
 
+/// Height of the speaker list's content, measured from the rows themselves.
+///
+/// `ScrollView` reports no intrinsic content height, so a `MenuBarExtra` window
+/// sizing itself to fit its content resolves it to zero and the list vanishes —
+/// a `maxHeight` alone only caps it, nothing gives it a floor. Measuring the
+/// rows and setting a definite height is what keeps them on screen.
+private struct ListHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct MenuView: View {
     @ObservedObject var model: AppModel
+
+    /// Tallest the list may grow before it starts scrolling.
+    private static let maxListHeight: CGFloat = 340
+
+    @State private var listHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -18,8 +36,14 @@ struct MenuView: View {
                         }
                     }
                     .padding(.vertical, 6)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: ListHeightKey.self, value: proxy.size.height)
+                        }
+                    )
                 }
-                .frame(maxHeight: 340)
+                .frame(height: min(max(listHeight, 1), Self.maxListHeight))
+                .onPreferenceChange(ListHeightKey.self) { listHeight = $0 }
             }
 
             if let error = model.errorMessage {
@@ -45,6 +69,17 @@ struct MenuView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+
+            // Only meaningful once remote.json exists; a failing relay is worth
+            // seeing here, because the website just goes quiet when it breaks.
+            if model.isRemoteEnabled {
+                Image(systemName: model.remoteError == nil
+                      ? "antenna.radiowaves.left.and.right"
+                      : "antenna.radiowaves.left.and.right.slash")
+                    .font(.system(size: 12))
+                    .foregroundStyle(model.remoteError == nil ? Color.accentColor : .orange)
+                    .help(model.remoteError ?? "Remote control online")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -170,10 +205,58 @@ private struct SpeakerRow: View {
             }
             .padding(.leading, 20)
             .opacity(speaker.canAdjustVolume ? 1 : 0.45)
+
+            delayRow
+                .padding(.leading, 20)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(speaker.isSelected ? Color.accentColor.opacity(0.07) : .clear)
+    }
+
+    /// Delay is a property of where the speaker sits in the room, so it stays
+    /// adjustable even while the speaker is disconnected.
+    private var delayRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "timer")
+                .font(.system(size: 10))
+                .frame(width: 14)
+                .foregroundStyle(.secondary)
+
+            Button {
+                model.adjustDelay(by: -AppModel.delayStep, for: speaker.id)
+            } label: {
+                Image(systemName: "chevron.left").font(.system(size: 10, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .disabled(speaker.delayMilliseconds <= AppModel.delayRange.lowerBound)
+
+            Text("\(speaker.delayMilliseconds) ms")
+                .font(.system(size: 10, design: .monospaced))
+                .frame(width: 52)
+
+            Button {
+                model.adjustDelay(by: AppModel.delayStep, for: speaker.id)
+            } label: {
+                Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .disabled(speaker.delayMilliseconds >= AppModel.delayRange.upperBound)
+
+            Text("delay")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+
+            if speaker.delayMilliseconds > 0 {
+                Button("Reset") { model.resetDelay(for: speaker.id) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+        .foregroundStyle(speaker.delayMilliseconds > 0 ? Color.primary : .secondary)
     }
 
     private var statusText: String {

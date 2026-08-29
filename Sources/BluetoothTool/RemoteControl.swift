@@ -1,9 +1,10 @@
 import Foundation
 import os
 
-/// A speaker as the website sees it.
+/// A speaker as the website sees it. No house id: the device token the agent
+/// presents is what decides which house these rows belong to, so the agent has
+/// no way to name — or mistakenly overwrite — anyone else's.
 struct RemoteSpeaker: Codable, Equatable {
-    let room_id: String
     let address: String
     let name: String
     let is_connected: Bool
@@ -15,12 +16,21 @@ struct RemoteSpeaker: Codable, Equatable {
     let delay_ms: Int
 }
 
+/// Playback as the website sees it.
+struct RemotePlayback: Codable, Equatable {
+    let is_playing: Bool
+    let track: String?
+    let artist: String?
+    let album: String?
+    let artwork_url: String?
+    let output_active: Bool
+}
+
 /// Everything the website renders, in one comparable lump so we only upload
 /// when something actually changed.
 struct RemoteSnapshot: Equatable {
     var speakers: [RemoteSpeaker]
-    var nowPlaying: NowPlaying?
-    var isActive: Bool
+    var playback: RemotePlayback
 }
 
 /// One instruction from a phone.
@@ -31,8 +41,14 @@ struct RemoteCommand: Decodable {
     let value: Double?
 }
 
-/// Bridges the local audio engine to a Supabase project so a phone on the
-/// internet can drive it.
+/// Bridges the local audio engine to the hosted Supabase project so a phone on
+/// the internet can drive it.
+///
+/// The entire API surface is two RPCs — `agent_publish` and `agent_poll` —
+/// authenticated by a device token rather than a Supabase session. That is
+/// deliberate: this process runs unattended on someone's kitchen Mac, so it
+/// should hold a credential that is scoped to one house, revocable from the
+/// website, and not something that needs refreshing.
 ///
 /// Commands are polled rather than streamed over Realtime: a websocket buys
 /// perhaps half a second of latency on a volume nudge and costs a dependency
@@ -46,10 +62,16 @@ actor RemoteControl {
 
     private var pollTask: Task<Void, Never>?
     private var lastPublished: RemoteSnapshot?
+    private var lastPublishedAt: Date?
     /// Reported to the UI so a broken relay is visible rather than silent.
     private(set) var lastError: String?
 
     private static let pollInterval = Duration.milliseconds(750)
+
+    /// Republish unchanged state this often. The website uses the resulting
+    /// timestamp to tell "nothing is happening" from "the Mac went to sleep",
+    /// which is the difference between a working page and a mystery.
+    private static let heartbeat: TimeInterval = 30
 
     init(config: RemoteConfig) {
         self.config = config
@@ -77,12 +99,25 @@ actor RemoteControl {
     // MARK: - Publishing
 
     func publish(_ snapshot: RemoteSnapshot) async {
-        guard snapshot != lastPublished else { return }
+        let stale = lastPublishedAt.map { Date().timeIntervalSince($0) >= Self.heartbeat } ?? true
+        guard snapshot != lastPublished || stale else { return }
+
+        struct Body: Encodable {
+            let p_token: String
+            let p_speakers: [RemoteSpeaker]
+            let p_playback: RemotePlayback
+        }
+
         do {
-            try await upsertSpeakers(snapshot.speakers)
-            try await pruneSpeakers(keeping: snapshot.speakers.map(\.address))
-            try await upsertPlayback(snapshot.nowPlaying, isActive: snapshot.isActive)
+            var request = try makeRequest(rpc: "agent_publish")
+            request.httpBody = try JSONEncoder().encode(
+                Body(p_token: config.deviceToken,
+                     p_speakers: snapshot.speakers,
+                     p_playback: snapshot.playback)
+            )
+            try await send(request)
             lastPublished = snapshot
+            lastPublishedAt = Date()
             lastError = nil
         } catch {
             // Keep lastPublished unchanged so the next tick retries.
@@ -91,67 +126,20 @@ actor RemoteControl {
         }
     }
 
-    private func upsertSpeakers(_ speakers: [RemoteSpeaker]) async throws {
-        guard !speakers.isEmpty else { return }
-        var request = try makeRequest(path: "speakers", query: "on_conflict=room_id,address")
-        request.httpMethod = "POST"
-        request.setValue("resolution=merge-duplicates", forHTTPHeaderField: "Prefer")
-        request.httpBody = try JSONEncoder().encode(speakers)
-        try await send(request)
-    }
-
-    /// Drop rows for speakers that are no longer paired, so the site doesn't
-    /// show devices that have been forgotten in System Settings.
-    private func pruneSpeakers(keeping addresses: [String]) async throws {
-        guard !addresses.isEmpty else { return }
-        let list = addresses.map { "\"\($0)\"" }.joined(separator: ",")
-        let query = "room_id=eq.\(config.roomID)&address=not.in.(\(list))"
-        var request = try makeRequest(path: "speakers", query: query)
-        request.httpMethod = "DELETE"
-        try await send(request)
-    }
-
-    private func upsertPlayback(_ nowPlaying: NowPlaying?, isActive: Bool) async throws {
-        struct Row: Encodable {
-            let room_id: String
-            let is_playing: Bool
-            let track: String?
-            let artist: String?
-            let album: String?
-            let artwork_url: String?
-            let output_active: Bool
-        }
-        let row = Row(
-            room_id: config.roomID,
-            is_playing: nowPlaying?.isPlaying ?? false,
-            track: nowPlaying?.track,
-            artist: nowPlaying?.artist,
-            album: nowPlaying?.album,
-            artwork_url: nowPlaying?.artworkURL,
-            output_active: isActive
-        )
-        var request = try makeRequest(path: "playback", query: "on_conflict=room_id")
-        request.httpMethod = "POST"
-        request.setValue("resolution=merge-duplicates", forHTTPHeaderField: "Prefer")
-        request.httpBody = try JSONEncoder().encode([row])
-        try await send(request)
-    }
-
     // MARK: - Commands
 
     private func drainCommands(handler: @escaping @MainActor (RemoteCommand) -> Void) async {
+        struct Body: Encodable { let p_token: String }
         do {
-            let query = "room_id=eq.\(config.roomID)&consumed_at=is.null&order=id.asc&limit=50"
-            var request = try makeRequest(path: "commands", query: query)
-            request.httpMethod = "GET"
+            var request = try makeRequest(rpc: "agent_poll")
+            request.httpBody = try JSONEncoder().encode(Body(p_token: config.deviceToken))
             let data = try await send(request)
+            // agent_poll marks these consumed in the same statement that returns
+            // them, so there is no second call and no chance of replaying one.
             let commands = try JSONDecoder().decode([RemoteCommand].self, from: data)
-            guard !commands.isEmpty else { return }
-
             for command in commands {
                 await MainActor.run { handler(command) }
             }
-            try await markConsumed(commands.map(\.id))
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -159,26 +147,17 @@ actor RemoteControl {
         }
     }
 
-    private func markConsumed(_ ids: [Int]) async throws {
-        let list = ids.map(String.init).joined(separator: ",")
-        var request = try makeRequest(path: "commands", query: "id=in.(\(list))")
-        request.httpMethod = "PATCH"
-        request.httpBody = try JSONSerialization.data(
-            withJSONObject: ["consumed_at": ISO8601DateFormatter().string(from: Date())]
-        )
-        try await send(request)
-    }
-
     // MARK: - HTTP
 
-    private func makeRequest(path: String, query: String) throws -> URLRequest {
-        guard let url = URL(string: "\(config.supabaseURL.absoluteString)/rest/v1/\(path)?\(query)") else {
+    private func makeRequest(rpc: String) throws -> URLRequest {
+        guard let url = URL(string: "\(config.supabaseURL.absoluteString)/rest/v1/rpc/\(rpc)") else {
             throw RemoteError.badURL
         }
         var request = URLRequest(url: url)
+        request.httpMethod = "POST"
         request.timeoutInterval = 10
-        request.setValue(config.serviceKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \(config.serviceKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
     }
@@ -200,11 +179,17 @@ actor RemoteControl {
 
         var errorDescription: String? {
             switch self {
-            case .badURL: return "The Supabase URL in remote.json isn't valid."
-            case .noResponse: return "No response from Supabase."
+            case .badURL: return "The Supabase URL in this Mac's setup code isn't valid."
+            case .noResponse: return "No response from the server."
             case .http(let code, let body):
-                if code == 401 || code == 403 { return "Supabase rejected the key (HTTP \(code))." }
-                return "Supabase returned HTTP \(code). \(body.prefix(120))"
+                // A revoked device raises from inside the RPC, which PostgREST
+                // reports as 400 with the message in the body — worth showing,
+                // because "revoke" is a button someone may have just pressed.
+                if body.contains("Unknown device token") {
+                    return "This Mac has been disconnected from its house. Paste a new setup code."
+                }
+                if code == 401 || code == 403 { return "The server rejected this Mac's credentials." }
+                return "Server returned HTTP \(code). \(body.prefix(120))"
             }
         }
     }

@@ -11,7 +11,7 @@ const DELAY_MAX = 500;
  * track the thumb at 60fps, and a round trip to the Mac is ~1s — so local state
  * leads and the realtime value only takes over once the user lets go.
  */
-export function SpeakerCard({ speaker }: { speaker: Speaker }) {
+export function SpeakerCard({ houseId, speaker }: { houseId: string; speaker: Speaker }) {
   const [volume, setVolume] = useState(speaker.volume);
   const [delay, setDelay] = useState(speaker.delay_ms);
   const dragging = useRef(false);
@@ -34,7 +34,7 @@ export function SpeakerCard({ speaker }: { speaker: Speaker }) {
     if (volumeTimer.current) clearTimeout(volumeTimer.current);
     // Coalesce the stream of input events into ~7 writes/sec.
     volumeTimer.current = setTimeout(() => {
-      sendCommand("set_volume", speaker.address, next);
+      sendCommand(houseId, "set_volume", speaker.address, next);
       dragging.current = false;
     }, 140);
   }
@@ -47,7 +47,7 @@ export function SpeakerCard({ speaker }: { speaker: Speaker }) {
     // Each change rebuilds the aggregate on the Mac, so wait for the taps to
     // stop before committing.
     delayTimer.current = setTimeout(() => {
-      sendCommand("set_delay", speaker.address, next);
+      sendCommand(houseId, "set_delay", speaker.address, next);
       delayTimer.current = null;
     }, 600);
   }
@@ -73,7 +73,7 @@ export function SpeakerCard({ speaker }: { speaker: Speaker }) {
           checked={speaker.is_selected}
           disabled={!speaker.is_connected}
           onChange={(e) =>
-            sendCommand("set_selected", speaker.address, e.target.checked ? 1 : 0)
+            sendCommand(houseId, "set_selected", speaker.address, e.target.checked ? 1 : 0)
           }
           aria-label={`Play to ${speaker.name}`}
         />
@@ -84,7 +84,7 @@ export function SpeakerCard({ speaker }: { speaker: Speaker }) {
           className="icon-btn"
           disabled={!speaker.supports_mute || !speaker.is_connected}
           onClick={() =>
-            sendCommand("set_muted", speaker.address, speaker.is_muted ? 0 : 1)
+            sendCommand(houseId, "set_muted", speaker.address, speaker.is_muted ? 0 : 1)
           }
           aria-label={speaker.is_muted ? "Unmute" : "Mute"}
         >

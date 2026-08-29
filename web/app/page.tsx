@@ -1,125 +1,99 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import {
-  isConfigured,
-  roomId,
-  sendCommand,
-  supabase,
-  type Playback,
-  type Speaker,
-} from "@/lib/supabase";
-import { SpeakerCard } from "@/components/SpeakerCard";
-import { NowPlayingBar } from "@/components/NowPlayingBar";
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { db, isConfigured, type Membership } from "@/lib/supabase";
+import { useSession, signOut } from "@/lib/useSession";
+import { SignInPanel } from "@/components/SignIn";
+import { NotConfigured } from "@/components/NotConfigured";
 
-export default function Page() {
-  const [speakers, setSpeakers] = useState<Speaker[]>([]);
-  const [playback, setPlayback] = useState<Playback | null>(null);
+export default function Home() {
+  const { user, loading } = useSession();
+  const [houses, setHouses] = useState<Membership[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!supabase) return;
-
-    async function load() {
-      const [s, p] = await Promise.all([
-        supabase!.from("speakers").select("*").eq("room_id", roomId),
-        supabase!.from("playback").select("*").eq("room_id", roomId).maybeSingle(),
-      ]);
-      if (s.data) setSpeakers(sort(s.data as Speaker[]));
-      if (p.data) setPlayback(p.data as Playback);
-      setLoaded(true);
-    }
-    load();
-
-    // The Mac republishes on every change, so rather than patch rows by hand we
-    // just re-read the small tables whenever anything moves.
-    const channel = supabase
-      .channel(`room:${roomId}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "speakers", filter: `room_id=eq.${roomId}` },
-        load,
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "playback", filter: `room_id=eq.${roomId}` },
-        load,
-      )
-      .subscribe();
-
-    return () => {
-      supabase!.removeChannel(channel);
-    };
+  const load = useCallback(async () => {
+    const { data, error } = await db()
+      .from("house_members")
+      .select("role, houses(*)")
+      .order("joined_at", { ascending: true });
+    if (error) setError(error.message);
+    // PostgREST types the embedded row as an array; it is a to-one join.
+    else setHouses((data ?? []) as unknown as Membership[]);
+    setLoaded(true);
   }, []);
 
-  if (!isConfigured) {
-    return (
-      <main>
-        <h1>Multi-Speaker</h1>
-        <div className="banner">
-          Not configured yet. Copy <code>.env.local.example</code> to{" "}
-          <code>.env.local</code> and fill in your Supabase URL, anon key, and room
-          id — then restart the dev server.
-        </div>
-      </main>
-    );
+  useEffect(() => {
+    if (user) load();
+  }, [user, load]);
+
+  async function createHouse(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setCreating(true);
+    setError(null);
+    const { error } = await db().rpc("create_house", { p_name: name.trim() });
+    setCreating(false);
+    if (error) return setError(error.message);
+    setName("");
+    load();
   }
 
-  const connected = speakers.filter((s) => s.is_connected);
-  const playingTo = speakers.filter((s) => s.is_selected && s.is_connected).length;
+  if (!isConfigured) return <NotConfigured />;
+  if (loading) return <main className="centered">Loading…</main>;
+  if (!user) return <SignInPanel next="/" />;
+
+  const owned = houses.filter((h) => h.role === "owner");
 
   return (
     <main>
-      <h1>Multi-Speaker</h1>
-      <p className="sub">
-        {playback?.output_active
-          ? `Playing to ${playingTo} speaker${playingTo === 1 ? "" : "s"}`
-          : "Output is off"}
-      </p>
-
-      {loaded && connected.length === 0 && (
-        <div className="banner">
-          No speakers are connected. Turn them on, or wake the Mac — it has to be
-          awake and running Multi-Speaker for this page to do anything.
-        </div>
-      )}
-
-      <div className="master">
-        <div>
-          <div className="name">House output</div>
-          <div className="status">
-            {playback?.output_active ? "On" : "Off"} · Multi-Speaker
-          </div>
-        </div>
-        <input
-          type="checkbox"
-          className="toggle"
-          checked={Boolean(playback?.output_active)}
-          onChange={(e) => sendCommand("set_active", null, e.target.checked ? 1 : 0)}
-          aria-label="House output"
-        />
+      <div className="topbar">
+        <h1>Your houses</h1>
+        <button className="link-btn" onClick={signOut}>
+          Sign out
+        </button>
       </div>
+      <p className="sub">{user.email}</p>
 
-      {!loaded ? (
-        <div className="empty">Loading…</div>
-      ) : speakers.length === 0 ? (
-        <div className="empty">
-          Nothing published yet. Is Multi-Speaker running on the Mac?
+      {error && <div className="banner error">{error}</div>}
+
+      {loaded && houses.length === 0 && (
+        <div className="banner">
+          You aren&rsquo;t in any house yet. Make one for your place below, or
+          open the link a friend sent you.
         </div>
-      ) : (
-        speakers.map((s) => <SpeakerCard key={s.address} speaker={s} />)
       )}
 
-      <NowPlayingBar playback={playback} />
+      {houses.map(({ role, houses: house }) => (
+        <Link key={house.id} href={`/house/${house.id}`} className="house-row">
+          <div>
+            <div className="name">{house.name}</div>
+            <div className="status">{role === "owner" ? "You host this" : "Shared with you"}</div>
+          </div>
+          <span className="chev">›</span>
+        </Link>
+      ))}
+
+      <form className="new-house" onSubmit={createHouse}>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="New house name, e.g. Greg's Place"
+          maxLength={60}
+          aria-label="New house name"
+        />
+        <button disabled={creating || !name.trim()}>{creating ? "…" : "Create"}</button>
+      </form>
+
+      {owned.length === 0 && (
+        <p className="fine">
+          A house is one computer with your speakers paired to it. Create one and
+          you&rsquo;ll get step-by-step setup instructions for that computer.
+        </p>
+      )}
     </main>
   );
-}
-
-/// Connected speakers first, then alphabetical — the ones you can actually
-/// affect belong at the top on a phone screen.
-function sort(list: Speaker[]) {
-  return [...list].sort((a, b) => {
-    if (a.is_connected !== b.is_connected) return a.is_connected ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
 }

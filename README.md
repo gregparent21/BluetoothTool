@@ -89,70 +89,59 @@ These are properties of Bluetooth audio on macOS, not bugs in the app:
 
 ## Remote control from a phone
 
-`web/` is a Next.js page your friends can open on their phones to control the
-speakers and Spotify. It is a **remote control, not an audio path** — the music
-still plays from this Mac, and the Mac has to be awake and running Multi-Speaker
-for the page to do anything.
+`web/` is a Next.js site where each person signs in with Google, creates a
+**house**, and gets a link they can send to friends so everyone can control the
+speakers from their phone.
+
+It is a **remote control, not an audio path**. The music still plays from the
+Mac, and that Mac has to be awake and running Multi-Speaker for the page to do
+anything.
 
 ```
-iPhone (Vercel)  ──insert command──▶  Supabase  ◀──poll every 750ms──  Mac
-       ▲                              Postgres                          │
-       └──────── realtime state ──────────┴──── publish state ──────────┘
+Friend's phone ─┐
+                │  Google sign-in, one house each
+ Your phone ────┼───────────▶  Vercel  ──▶  Supabase (Postgres + Auth)
+                │                                    ▲
+                └────────────────────────────────────┤ publish state,
+                                                     │ drain commands
+                                          Your Mac ──┘ (polled, 750ms)
 ```
 
 Commands go one way and state comes back the other; nothing needs an inbound
 port or a static IP, because the Mac only ever makes outbound connections.
 
-### 1. Supabase
+### Setting it up
 
-Create a project, open the SQL editor, and run [`supabase/schema.sql`](supabase/schema.sql).
-The last statement returns a room uuid — keep it.
+One person deploys the backend once — [`DEPLOY.md`](DEPLOY.md) covers Supabase,
+Google OAuth, and Vercel end to end. After that, each new person:
 
-### 2. The Mac
+1. Opens the site and signs in with Google.
+2. Creates a house, and follows the setup page.
+3. **Picks one computer for the house.** Every speaker pairs to that Mac, and
+   that Mac is what plays the music — so it should be the one that lives where
+   the speakers are and stays plugged in.
+4. Runs `./build.sh` on it, then pastes the setup code from the website into the
+   menu bar app under **Set up remote…**.
+5. Sends the invite link to whoever should be able to change the music.
 
-Create `~/.config/multi-speaker/remote.json`. It is read at launch and never
-committed:
-
-```jsonc
-{
-  "supabaseURL": "https://xxxx.supabase.co",
-  "serviceKey": "<service_role key from Settings → API>",
-  "roomID": "<the uuid from step 1>",
-  "roomName": "House"
-}
-```
-
-Restart the app. An antenna icon appears in the menu header — blue when the
-relay is healthy, orange with the reason on hover when it isn't. Without this
-file the app runs exactly as before, local-only.
-
-The first time it reads Spotify, macOS asks for Automation permission. Say yes,
-or now-playing and the transport buttons stay dead.
-
-### 3. The website
-
-```sh
-cd web
-cp .env.local.example .env.local   # fill in URL, anon key, room id
-npm install && npm run dev
-```
-
-Deploy with `vercel` (or point Vercel at the repo with `web` as the root
-directory) and set the same three `NEXT_PUBLIC_*` variables in the project
-settings. Send your friends the URL.
-
-[`DEPLOY.md`](DEPLOY.md) walks all of this end to end, with the verification
-steps and the mistakes worth avoiding.
+No file editing, no keys to copy by hand, and nothing shared between houses.
 
 ### Who can control it
 
-**The room id in the URL is the password.** Anyone with the link has full
-control, links can be forwarded, and there is no way to revoke one person — to
-cut everyone off, insert a new room and update both config files. The anon key
-in the page is public by design and RLS keeps it to reading state and queueing
-commands; the `service_role` key stays on your Mac and never reaches the browser.
-That trade is right for a party and wrong for anything else — put Supabase Auth
-in front of it if you ever need more.
+Access is per house and tied to a real account:
+
+- **Following an invite link requires signing in**, and adds that account to the
+  house. Forwarding a link lets someone else join; it does not hand over a
+  session.
+- **The owner can rotate the link**, which kills every link handed out so far
+  while leaving current members in place.
+- **Members can control the speakers and nothing else** — they cannot read the
+  command queue, see the house's devices, or learn that other houses exist.
+
+Each Mac authenticates with a **device token** scoped to one house, revocable
+from the website. Earlier versions put a Supabase `service_role` key on the Mac,
+which was defensible when you ran your own backend and is not once one backend
+serves several people. Nothing outside Supabase holds that key now.
 
 ## Self-test
 
@@ -176,8 +165,8 @@ restores everything it touches (volumes, default output, connections):
 | `Sources/BluetoothTool/MenuView.swift` | Menu bar UI |
 | `Sources/BluetoothTool/NowPlaying.swift` | Spotify transport and now-playing, over AppleScript |
 | `Sources/BluetoothTool/RemoteControl.swift` | Supabase agent: publishes state, drains commands |
-| `Sources/BluetoothTool/RemoteConfig.swift` | Loads `~/.config/multi-speaker/remote.json` |
-| `supabase/schema.sql` | Tables, realtime, and RLS for the relay |
-| `web/` | Next.js remote page for phones |
-| `DEPLOY.md` | Supabase + Vercel deployment guide |
+| `Sources/BluetoothTool/RemoteConfig.swift` | Device credentials, and the setup-code format |
+| `supabase/schema.sql` | Tables, accounts, RLS, and the agent's two RPCs |
+| `web/` | Next.js site: sign-in, houses, invites, controls |
+| `DEPLOY.md` | Supabase + Google OAuth + Vercel deployment guide |
 | `Tools/SelfTest.swift` | Hardware self-test |

@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Multi-Speaker",
-  description: "Control the house speakers",
+  description: "One song, every speaker in the house",
   appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Speakers" },
 };
 

@@ -37,6 +37,11 @@ final class AppModel: ObservableObject {
     /// nil when the remote is off or healthy; a message when the relay is failing.
     @Published private(set) var remoteError: String?
     @Published private(set) var isRemoteEnabled = false
+    /// The house this Mac serves, for the menu header. nil when local-only.
+    @Published private(set) var houseName: String?
+    /// A remote.json from the single-house version, which cannot be migrated —
+    /// the service key it holds is no longer how the agent authenticates.
+    @Published private(set) var hasStaleRemoteConfig = false
 
     private let multiOutput = MultiOutputDevice()
     private var selectedAddresses: Set<String>
@@ -58,7 +63,9 @@ final class AppModel: ObservableObject {
     private var delaySettleTask: Task<Void, Never>?
     private var isAdjustingDelay = false
 
-    private let remoteConfig = RemoteConfig.load()
+    /// Replaced at runtime when the user pastes a setup code, so connecting a
+    /// Mac to a house never needs a relaunch.
+    private var remoteConfig = RemoteConfig.load()
     private var remote: RemoteControl?
     /// Guards against a slow publish overlapping the next 2s tick.
     private var isPublishing = false
@@ -96,15 +103,51 @@ final class AppModel: ObservableObject {
     // MARK: - Remote control
 
     private func startRemoteIfConfigured() {
-        guard let remoteConfig else { return }
+        guard let remoteConfig else {
+            hasStaleRemoteConfig = RemoteConfig.isStale()
+            return
+        }
+        hasStaleRemoteConfig = false
         let remote = RemoteControl(config: remoteConfig)
         self.remote = remote
         isRemoteEnabled = true
+        houseName = remoteConfig.houseName
         Task {
             await remote.start { [weak self] command in
                 self?.apply(command)
             }
         }
+    }
+
+    /// Connect this Mac to a house from a code pasted out of the website.
+    /// Throws so the setup panel can say exactly what went wrong.
+    func applySetupCode(_ raw: String) throws {
+        let config = try RemoteConfig.decode(setupCode: raw)
+        try config.save()
+        stopRemote()
+        remoteConfig = config
+        startRemoteIfConfigured()
+        // Publish immediately rather than waiting for the 2s tick, so the
+        // website stops saying "no computer set up" while the user is looking.
+        Task { await updateRemote() }
+    }
+
+    /// Forget the house. The website keeps the device until its owner revokes
+    /// it there; this only stops *this* Mac from acting on it.
+    func disconnectRemote() throws {
+        try RemoteConfig.remove()
+        stopRemote()
+        remoteConfig = nil
+        hasStaleRemoteConfig = false
+    }
+
+    private func stopRemote() {
+        let old = remote
+        Task { await old?.stop() }
+        remote = nil
+        isRemoteEnabled = false
+        houseName = nil
+        remoteError = nil
     }
 
     /// Push local state out and pull Spotify's. Runs off the 2s refresh tick.
@@ -117,11 +160,10 @@ final class AppModel: ObservableObject {
         let playing = await Task.detached(priority: .utility) { SpotifyControl.nowPlaying() }.value
         if playing != nowPlaying { nowPlaying = playing }
 
-        guard let remote, let roomID = remoteConfig?.roomID else { return }
+        guard let remote else { return }
         let snapshot = RemoteSnapshot(
             speakers: speakers.map {
                 RemoteSpeaker(
-                    room_id: roomID,
                     address: $0.id,
                     name: $0.name,
                     is_connected: $0.isConnected,
@@ -133,8 +175,14 @@ final class AppModel: ObservableObject {
                     delay_ms: $0.delayMilliseconds
                 )
             },
-            nowPlaying: playing,
-            isActive: isActive
+            playback: RemotePlayback(
+                is_playing: playing?.isPlaying ?? false,
+                track: playing?.track,
+                artist: playing?.artist,
+                album: playing?.album,
+                artwork_url: playing?.artworkURL,
+                output_active: isActive
+            )
         )
         await remote.publish(snapshot)
 

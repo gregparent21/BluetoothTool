@@ -4,7 +4,7 @@ import { sendCommand, type Playback } from "@/lib/supabase";
 
 /// Fixed transport bar. Mirrors Spotify on the Mac; the Mac is what's actually
 /// playing, so these are just remote key presses.
-export function NowPlayingBar({ playback }: { playback: Playback | null }) {
+export function NowPlayingBar({ houseId, playback }: { houseId: string; playback: Playback | null }) {
   const hasTrack = Boolean(playback?.track);
 
   return (
@@ -27,13 +27,13 @@ export function NowPlayingBar({ playback }: { playback: Playback | null }) {
         </div>
 
         <div className="transport">
-          <button onClick={() => sendCommand("previous")} aria-label="Previous">
+          <button onClick={() => sendCommand(houseId, "previous")} aria-label="Previous">
             ⏮
           </button>
-          <button onClick={() => sendCommand("playpause")} aria-label="Play or pause">
+          <button onClick={() => sendCommand(houseId, "playpause")} aria-label="Play or pause">
             {playback?.is_playing ? "⏸" : "▶"}
           </button>
-          <button onClick={() => sendCommand("next")} aria-label="Next">
+          <button onClick={() => sendCommand(houseId, "next")} aria-label="Next">
             ⏭
           </button>
         </div>

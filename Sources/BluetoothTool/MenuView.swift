@@ -20,8 +20,21 @@ struct MenuView: View {
     private static let maxListHeight: CGFloat = 340
 
     @State private var listHeight: CGFloat = 0
+    /// Swaps the whole menu for the setup form. A sheet would be the obvious
+    /// choice, but sheets inside a MenuBarExtra window are unreliable — the
+    /// popover dismisses itself out from under them.
+    @State private var showingSetup = false
 
     var body: some View {
+        if showingSetup {
+            RemoteSetupPanel(model: model, isPresented: $showingSetup)
+                .frame(width: 340)
+        } else {
+            speakerMenu
+        }
+    }
+
+    private var speakerMenu: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
@@ -67,6 +80,12 @@ struct MenuView: View {
                 Text(model.statusMessage ?? (model.isActive ? "Active" : "Not playing"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                if let house = model.houseName {
+                    Text(house)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
             Spacer()
 
@@ -125,6 +144,13 @@ struct MenuView: View {
             .disabled(!model.isActive && model.selectedCount == 0)
 
             Spacer()
+
+            Button(model.isRemoteEnabled ? "Remote…" : "Set up remote…") {
+                showingSetup = true
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(model.hasStaleRemoteConfig ? Color.orange : Color.accentColor)
+            .font(.system(size: 12))
 
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .buttonStyle(.plain)
@@ -272,5 +298,158 @@ private struct SpeakerRow: View {
 
     private var volumeLabel: String {
         speaker.canAdjustVolume ? "\(Int((speaker.volume * 100).rounded()))%" : "—"
+    }
+}
+
+
+/// Connects this Mac to a house by pasting the setup code the website shows the
+/// house's owner.
+///
+/// Pasting is the whole interaction on purpose. The alternative — telling
+/// people to create `~/.config/multi-speaker/remote.json` by hand — is fine for
+/// the person who wrote the app and a wall for everyone who was handed it at a
+/// party.
+private struct RemoteSetupPanel: View {
+    @ObservedObject var model: AppModel
+    @Binding var isPresented: Bool
+
+    @State private var code = ""
+    @State private var error: String?
+    @State private var confirmingDisconnect = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Remote control")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button("Done") { isPresented = false }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.accentColor)
+            }
+
+            if model.isRemoteEnabled {
+                connected
+            } else {
+                setupForm
+            }
+        }
+        .padding(14)
+    }
+
+    private var connected: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: model.remoteError == nil
+                      ? "antenna.radiowaves.left.and.right"
+                      : "antenna.radiowaves.left.and.right.slash")
+                    .foregroundStyle(model.remoteError == nil ? Color.accentColor : .orange)
+                Text(model.houseName ?? "Connected")
+                    .font(.system(size: 12, weight: .medium))
+            }
+
+            Text(model.remoteError ?? "This Mac is serving the house. Anyone with its invite link can control these speakers from their phone.")
+                .font(.system(size: 11))
+                .foregroundStyle(model.remoteError == nil ? Color.secondary : Color.orange)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            if confirmingDisconnect {
+                Text("Stop serving this house? The speakers keep working locally.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Disconnect") { disconnect() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                    Button("Keep it") { confirmingDisconnect = false }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Button("Disconnect this Mac…") { confirmingDisconnect = true }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+            }
+
+            if let error { errorText(error) }
+        }
+    }
+
+    private var setupForm: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if model.hasStaleRemoteConfig {
+                Text("This Mac has settings from an older version that can no longer be used. Sign in on the website, open your house, and paste its new setup code.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("On the Multi-Speaker website, create a house and open its setup page. Paste the setup code it gives you here.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            TextEditor(text: $code)
+                .font(.system(size: 10, design: .monospaced))
+                .frame(height: 70)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+                .scrollContentBackground(.hidden)
+
+            HStack {
+                Button("Paste") {
+                    code = NSPasteboard.general.string(forType: .string) ?? ""
+                    error = nil
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(Color.accentColor)
+
+                Spacer()
+
+                Button("Connect") { connect() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if let error { errorText(error) }
+
+            Text("Every speaker for the house pairs to this Mac, and this Mac is what plays the music. It has to stay awake with this app running.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func errorText(_ message: String) -> some View {
+        Text(message)
+            .font(.system(size: 11))
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func connect() {
+        do {
+            try model.applySetupCode(code)
+            code = ""
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func disconnect() {
+        do {
+            try model.disconnectRemote()
+            confirmingDisconnect = false
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }
